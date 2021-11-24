@@ -1,0 +1,91 @@
+import re
+import requests
+from bs4 import UnicodeDammit
+from flask import Flask,jsonify
+class Getinfo:  #获得充电桩信息
+    def __init__(self, cookies):
+        self.cookies = cookies;
+    def getHTMLText(self,url):  #通过requests请求爬取网页数据
+        try:
+            headers = {
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; JER-AN10 Build/HUAWEIJER-AN10; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/89.0.4389.72 MQQBrowser/6.2 TBS/045811 Mobile Safari/537.36 MMWEBID/6802 MicroMessenger/8.0.15.2020(0x28000F39) Process/tools WeChat/arm64 Weixin NetType/4G Language/zh_CN ABI/arm64',
+                'Referer': 'https://api.issks.com/issksapi/V2/ec/stationList.shtml',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Cookie': self.cookies
+            }
+            resp = requests.get(url, headers=headers)  # 传递cookie
+            resp.raise_for_status()  # 如果状态不是200，引发HTTPError异常
+            resp.encoding = resp.apparent_encoding
+            data = resp.text
+            return data
+
+        except Exception as err:
+            print(err)
+
+    def  getStationlist(self):  #通过访问主页面爬取所有充电桩的id和name,以列表形式返回
+        try:
+            text = self.getHTMLText('https://api.issks.com/issksapi/V2/ec/stationList/json.shtml?mapX=119.19852436911&mapY=26.055783936956')
+            dammit = UnicodeDammit(text, ["utf-8", "utf-16"], "gbk")
+            text = dammit.unicode_markup
+            stationlist = re.compile('"iStationId":([0-9]*),"vStationName":"(福州大学|福大)(.*?)",'
+                                     '"iManagerId"', re.S).findall(text)
+            stationlist=sorted(stationlist,key=lambda x:x[1])
+            return stationlist
+        except Exception as err:
+            print(err)
+
+    def getstationState(self,stationId):  #爬取每个充电桩数据
+        try:
+            #用充电桩的id拼接得到每个充电桩的url并调用getHTMLText()方法访问
+            text=self.getHTMLText( 'https://api.issks.com/issksapi/V2/ec/chargingList.shtml?stationId='+stationId)
+            dammit = UnicodeDammit(text, ["utf-8", "utf-16"], "gbk")
+            text = dammit.unicode_markup
+            #匹配得到充电桩的各个接口及各个接口的状态
+            stationstate = re.compile('"vOutletName":"插座([0-9]*)",.*?"iCurrentChargingRecordId":(.*?),', re.S).findall(text)
+            sum_free=0  #统计空闲接口的总个数
+            socket_free=""  #统计空闲接口情况
+            socket_nofree=""  #统计占用接口情况
+            for sockets in stationstate:  #对于每个插口,统计上述三个数据
+                if sockets[1]=='0':  #若iCurrentChargingRecordId=0,即sockets[1]=='0',则该插口空闲
+                    sum_free+=1
+                    socket_free += '插座'+sockets[0]+"、" #插口之间用'、'隔开
+                else:  #否则该插口被占用
+                    socket_nofree += '插座' + sockets[0]+"、"  #插口之间用'、'隔开
+            if socket_free=="": socket_free+="无"  #若没有空闲插口,则空闲接口情况填充为'无'
+            if socket_nofree == "": socket_nofree += "无"  #若没有占用插口,则占用接口情况填充为'无'
+            if socket_free[-1]=='、':socket_free=socket_free[:-1]  #去掉字符串末尾的'、'
+            if socket_nofree[-1] == '、': socket_nofree = socket_nofree[:-1]  #去掉字符串末尾的'、'
+            sum_free=str(sum_free)+"/"+str(len(stationstate))  #利用统计的空闲接口的总个数与接口总个数相比得到空闲插口占比
+            return socket_free,socket_nofree,sum_free  #返回得到空闲插口、占用插口、空闲插口占比
+        except Exception as err:
+            print(err)
+
+    def retuslt(self,result):  #生成最终结果
+        stationlist = self.getStationlist()  #调用getStationlist()方法得到所有充电站的信息，包括id、“福州大学|福大”、名称（第二列不需要）
+        for station in stationlist:  #对于每个充电桩
+            state = self.getstationState(station[0])  #根据id调用getstationState(station[0])方法得到所有插口的状态信息，包括空闲插口、占用插口、空闲插口占比
+            resulti = {}
+            resulti["充电桩名称"] = station[2]
+            resulti["空闲插口"] = state[0]
+            resulti["占用插口"] = state[1]
+            resulti["空闲插口占比"] = state[2]
+            result["stationlist"].append(resulti)  #将每个充电桩的信息以存入字典，便于最终形成json格式
+        return result
+
+app = Flask(__name__)#创建一个服务，赋值给APP
+app.config['JSON_AS_ASCII'] = False
+@app.route('/stationstate',methods=["GET"])#指定接口访问的路径，支持什么请求方式get，post
+def index():#-----这里的函数名称可以任意取
+    result = {} #建立字典存数据，便于最终形成json格式
+    result["stationlist"] = [] #将所有数据存入以"stationlist"为key的value中
+    cookies = 'JSESSIONID=D6F4F16235EE640C118B5C6CA742306B'  #动态指定cookies
+    info = Getinfo(cookies)  #根据cookies调用Getinfo类
+    data = info.retuslt(result)  #调用result()方法得到最终结果
+    return  jsonify(data)  #把字典转成json串返回
+
+if __name__=='__main__':
+    app.run(host='0.0.0.0', port=5000,debug=False)
+
+
